@@ -1,25 +1,24 @@
 import numpy as np
-import pytest
-import torch
 from PIL import Image
 
+import clip_jax
 import clip
 
+image_fn, text_fn, jax_params, jax_preprocess = clip_jax.load('ViT-B/32', "cpu")
 
-@pytest.mark.parametrize('model_name', clip.available_models())
-def test_consistency(model_name):
-    device = "cpu"
-    jit_model, transform = clip.load(model_name, device=device)
-    py_model, _ = clip.load(model_name, device=device, jit=False)
+jax_image = np.expand_dims(jax_preprocess(Image.open("CLIP.png")), 0)
+jax_text = clip_jax.tokenize(["a diagram", "a dog", "a cat"])
 
-    image = transform(Image.open("CLIP.png")).unsqueeze(0).to(device)
-    text = clip.tokenize(["a diagram", "a dog", "a cat"]).to(device)
+jax_image_embed = image_fn(jax_params, jax_image)
+jax_text_embed = text_fn(jax_params, jax_text)
 
-    with torch.no_grad():
-        logits_per_image, _ = jit_model(image, text)
-        jit_probs = logits_per_image.softmax(dim=-1).cpu().numpy()
+pytorch_clip, pyt_preprocess = clip.load('ViT-B/32', "cpu")
 
-        logits_per_image, _ = py_model(image, text)
-        py_probs = logits_per_image.softmax(dim=-1).cpu().numpy()
+pyt_image = pyt_preprocess(Image.open("CLIP.png")).unsqueeze(0).to("cpu")
+pyt_text = clip.tokenize(["a diagram", "a dog", "a cat"])
 
-    assert np.allclose(jit_probs, py_probs, atol=0.01, rtol=0.1)
+pyt_image_embed = pytorch_clip.encode_image(pyt_image)
+pyt_text_embed = pytorch_clip.encode_text(pyt_text)
+
+assert np.allclose(np.array(jax_image_embed), pyt_image_embed.cpu().detach().numpy(), atol=0.01, rtol=0.01)
+assert np.allclose(np.array(jax_text_embed), pyt_text_embed.cpu().detach().numpy(), atol=0.01, rtol=0.01)

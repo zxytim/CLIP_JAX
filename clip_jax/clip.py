@@ -4,19 +4,25 @@ import urllib
 import warnings
 from typing import Union, List
 
+import jax
+import haiku as hk
+import jax.numpy as jnp
+import numpy as np
 import torch
 from PIL import Image
+from haiku._src.data_structures import FlatMapping
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 from tqdm import tqdm
 
-from .model import build_model
+from .model import CLIP, get_params
 from .simple_tokenizer import SimpleTokenizer as _Tokenizer
 
 __all__ = ["available_models", "load", "tokenize"]
 _tokenizer = _Tokenizer()
 
 _MODELS = {
-    "RN50": "https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt",
+    # only ViT is supported for now
+    # "RN50": "https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt",
     "ViT-B/32": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
 }
 
@@ -60,6 +66,7 @@ def _transform(n_px):
         lambda image: image.convert("RGB"),
         ToTensor(),
         Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        lambda tensor: tensor.cpu().detach().numpy()
     ])
 
 
@@ -68,7 +75,55 @@ def available_models() -> List[str]:
     return list(_MODELS.keys())
 
 
-def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", jit=True):
+def convert_params(torch_state, jax_params):
+    def name_iter(pytree, root, f):
+        new_out = {}
+        for k, v in pytree.items():
+            if isinstance(v, FlatMapping):
+                new_out[k] = name_iter(v, root + "/" + k, f)
+            else:
+                new_out[k] = f(v, root + "/" + k)
+        return new_out
+
+    def process_node(value, name):
+        name = name.lstrip("/")
+        tensor_name = name.split("/")[-1]
+        tensor_name = {
+            "w": "weight",
+            "b": "bias",
+            "scale": "weight",
+            "offset": "bias",
+            "embeddings": "weight",
+        }.get(tensor_name, tensor_name)
+
+        tensor_path = "/".join(name.split("/")[:-1]).replace("/~/", ".").replace("/", ".").replace("resblocks",
+                                                                                                   "resblocks.").replace(
+            "~", "")
+        new_tensor = value
+
+        pytorch_name = tensor_path + "." + tensor_name if tensor_path else tensor_name
+
+        if "conv" in name:
+            pytorch_path = tensor_path + "." + tensor_name
+            pytorch_tensor = torch_state[pytorch_path].permute([2, 3, 1, 0])
+            new_tensor = jnp.array(pytorch_tensor)
+        elif pytorch_name in torch_state:
+            pytorch_tensor = torch_state[pytorch_name]
+
+            if tensor_name == "weight" and "token_embedding" not in tensor_path:
+                pytorch_tensor = pytorch_tensor.t()
+
+            new_tensor = jnp.array(pytorch_tensor)
+        else:
+            raise Exception("not implemented")
+
+        assert new_tensor.shape == value.shape
+        return new_tensor.astype("float32")
+
+    return name_iter(jax_params, "", process_node)
+
+
+def load(name: str, device: Union[str, torch.device] = "cpu", jit=True):
     """Load a CLIP model
 
     Parameters
@@ -99,64 +154,34 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
 
     try:
         # loading JIT archive
-        model = torch.jit.load(model_path, map_location=device if jit else "cpu").eval()
-        state_dict = None
+        state_dict = torch.jit.load(model_path, map_location=device if jit else "cpu").eval().state_dict()
     except RuntimeError:
-        # loading saved state dict
-        if jit:
-            warnings.warn(f"File {model_path} is not a JIT archive. Loading as a state dict instead")
-            jit = False
         state_dict = torch.load(model_path, map_location="cpu")
 
-    if not jit:
-        model = build_model(state_dict or model.state_dict()).to(device)
-        if str(device) == "cpu":
-            model.float()
-        return model, _transform(model.visual.input_resolution)
+    clip_params = get_params(state_dict)
 
-    # patch the device names
-    device_holder = torch.jit.trace(lambda: torch.ones([]).to(torch.device(device)), example_inputs=[])
-    device_node = [n for n in device_holder.graph.findAllNodes("prim::Constant") if "Device" in repr(n)][-1]
+    # jax model
+    def clip_jax(image, text):
+        clip = CLIP(**clip_params)
+        return clip.encode_image(image), clip.encode_text(text)
 
-    def patch_device(module):
-        graphs = [module.graph] if hasattr(module, "graph") else []
-        if hasattr(module, "forward1"):
-            graphs.append(module.forward1.graph)
+    def vit_jax(image):
+        clip = CLIP(**clip_params)
+        return clip.encode_image(image)
 
-        for graph in graphs:
-            for node in graph.findAllNodes("prim::Constant"):
-                if "value" in node.attributeNames() and str(node["value"]).startswith("cuda"):
-                    node.copyAttributes(device_node)
+    def text_jax(text):
+        clip = CLIP(**clip_params)
+        return clip.encode_text(text)
 
-    model.apply(patch_device)
-    patch_device(model.encode_image)
-    patch_device(model.encode_text)
+    rng_key = jax.random.PRNGKey(42)
+    transformed = hk.transform(clip_jax)
+    jax_params = transformed.init(rng=rng_key, image=jnp.zeros((1, 3, 224, 224)), text=jnp.zeros((1, 77), dtype=jnp.int16))
+    jax_params = convert_params(state_dict, jax_params)
 
-    # patch dtype to float32 on CPU
-    if str(device) == "cpu":
-        float_holder = torch.jit.trace(lambda: torch.ones([]).float(), example_inputs=[])
-        float_input = list(float_holder.graph.findNode("aten::to").inputs())[1]
-        float_node = float_input.node()
+    image_fn = hk.without_apply_rng(hk.transform(vit_jax)).apply
+    text_fn = hk.without_apply_rng(hk.transform(text_jax)).apply
 
-        def patch_float(module):
-            graphs = [module.graph] if hasattr(module, "graph") else []
-            if hasattr(module, "forward1"):
-                graphs.append(module.forward1.graph)
-
-            for graph in graphs:
-                for node in graph.findAllNodes("aten::to"):
-                    inputs = list(node.inputs())
-                    for i in [1, 2]:  # dtype can be the second or third argument to aten::to()
-                        if inputs[i].node()["value"] == 5:
-                            inputs[i].node().copyAttributes(float_node)
-
-        model.apply(patch_float)
-        patch_float(model.encode_image)
-        patch_float(model.encode_text)
-
-        model.float()
-
-    return model, _transform(model.input_resolution.item())
+    return image_fn, text_fn, jax_params, _transform(clip_params["image_resolution"])
 
 
 def tokenize(texts: Union[str, List[str]], context_length: int = 77) -> torch.LongTensor:
@@ -181,11 +206,11 @@ def tokenize(texts: Union[str, List[str]], context_length: int = 77) -> torch.Lo
     sot_token = _tokenizer.encoder["<|startoftext|>"]
     eot_token = _tokenizer.encoder["<|endoftext|>"]
     all_tokens = [[sot_token] + _tokenizer.encode(text) + [eot_token] for text in texts]
-    result = torch.zeros(len(all_tokens), context_length, dtype=torch.long)
+    result = np.zeros((len(all_tokens), context_length), dtype=np.int32)
 
     for i, tokens in enumerate(all_tokens):
         if len(tokens) > context_length:
             raise RuntimeError(f"Input {texts[i]} is too long for context length {context_length}")
-        result[i, :len(tokens)] = torch.tensor(tokens)
+        result[i, :len(tokens)] = tokens
 
     return result
