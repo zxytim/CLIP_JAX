@@ -6,10 +6,10 @@ CLIP (Contrastive Language-Image Pre-Training) is a neural network trained on a 
 
 # Details
 
-The model has been ported to Haiku, while preserving the same output. See `tests/test_consistency.py` for details.
+The ViT model and checkpoints have been ported to Haiku, while preserving the same output. See `tests/test_consistency.py` for details.
 
-No JIT/pmap is performed, but pure inference functions for both the text and image encoders are output which should be
-easy to run/parallelize how you wish.
+No JIT/pmap is performed, but pure inference functions for both the text and image encoders are provided from the the
+`clip_jax.load()` function which should be easy to run/parallelize how you wish.
 
 ## Usage Example
 
@@ -21,12 +21,11 @@ import clip_jax
 
 image_fn, text_fn, jax_params, jax_preprocess = clip_jax.load('ViT-B/32', "cpu")
 
-jax_image = np.expand_dims(jax_preprocess(Image.open("CLIP.png")), 0)
-jax_text = clip_jax.tokenize(["a diagram", "a dog", "a cat"])
+image = np.expand_dims(jax_preprocess(Image.open("CLIP.png")), 0)
+text = clip_jax.tokenize(["a diagram", "a dog", "a cat"])
 
-jax_image_embed = image_fn(jax_params, jax_image)
-jax_text_embed = text_fn(jax_params, jax_text)
-
+image_embed = image_fn(jax_params, image)
+text_embed = text_fn(jax_params, text)
 ```
 
 ## TODOs
