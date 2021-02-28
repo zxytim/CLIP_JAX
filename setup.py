@@ -4,11 +4,11 @@ import pkg_resources
 from setuptools import setup, find_packages
 
 setup(
-    name="clip",
-    py_modules=["clip"],
+    name="clip_jax",
+    py_modules=["clip_jax"],
     version="1.0",
     description="",
-    author="OpenAI",
+    author="Ben Wang",
     packages=find_packages(exclude=["tests*"]),
     install_requires=[
         str(r)
