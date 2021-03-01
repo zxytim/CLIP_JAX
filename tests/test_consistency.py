@@ -22,3 +22,5 @@ pyt_text_embed = pytorch_clip.encode_text(pyt_text)
 
 assert np.allclose(np.array(jax_image_embed), pyt_image_embed.cpu().detach().numpy(), atol=0.01, rtol=0.01)
 assert np.allclose(np.array(jax_text_embed), pyt_text_embed.cpu().detach().numpy(), atol=0.01, rtol=0.01)
+
+print("done!")

@@ -9,7 +9,7 @@ CLIP (Contrastive Language-Image Pre-Training) is a neural network trained on a 
 The ViT model and checkpoints have been ported to Haiku, while preserving the same output. See `tests/test_consistency.py` for details.
 
 No JIT/pmap is performed, but pure inference functions for both the text and image encoders are provided from the the
-`clip_jax.load()` function which should be easy to run/parallelize how you wish.
+`clip_jax.load()` function which should be easy to run/parallelize how you wish. See `test/tpu_bench.py` for an example of using pmap.
 
 ## Usage Example
 
@@ -28,8 +28,17 @@ image_embed = image_fn(jax_params, image)
 text_embed = text_fn(jax_params, text)
 ```
 
+## TPU performance
+
+On a TPU v3-8 with Jax tpu-vm alpha (`test/tpu_bench.py`):
+```
+10.1361s to compile model
+43.9599s for 16 batches
+5963.25 examples/s
+```
+
 ## TODOs
-- [ ] Test on TPUs
+- [x] Test on TPUs
 - [ ] Easier control over precision and device placement
 - [ ] Mixed precision training support
 - [ ] Support RN50 model
