@@ -110,8 +110,7 @@ class VisualTransformer(hk.Module):
         self.conv1 = hk.Conv2D(output_channels=width, kernel_shape=patch_size, stride=patch_size, with_bias=False,
                                data_format="NCHW", name="conv1")
 
-        scale = width ** -0.5
-        w_init = hk.initializers.TruncatedNormal(1. / np.sqrt(scale))
+        w_init = hk.initializers.TruncatedNormal(1. / np.sqrt(width))
         self.class_embedding = hk.get_parameter("class_embedding", shape=[width], init=w_init)
         self.positional_embedding = hk.get_parameter("positional_embedding",
                                                      shape=[(input_resolution // patch_size) ** 2 + 1, width],
