@@ -28,3 +28,4 @@ def test_model(model_name):
 
 test_model("ViT-B/32")
 test_model("ViT-B/16")
+test_model("ViT-L/14")
